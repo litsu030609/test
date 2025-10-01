@@ -1,0 +1,235 @@
+Sub CreateComparisonFiles()
+    Dim wbDump As Workbook
+    Dim wbTemplate As Workbook
+    Dim wbOutput As Workbook
+    Dim wsDump As Worksheet
+    Dim wsTemplate As Worksheet
+    Dim wsNew As Worksheet
+    
+    Dim lastRow As Long
+    Dim i As Long
+    Dim cellValue As String
+    Dim functionName As String
+    Dim caseNumber As String
+    Dim tableName As String
+    Dim prevFunctionCase As String
+    Dim currentFunctionCase As String
+    
+    Dim dictTables As Object
+    Dim key As Variant
+    Dim dataCollection As Collection
+    Dim dataItem As Object
+    
+    Dim currentData As Object
+    Dim genData As Collection
+    Dim shinData As Collection
+    
+    ' エラーハンドリング
+    On Error GoTo ErrorHandler
+    
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+    
+    ' ファイルを開く
+    Set wbDump = Workbooks.Open(ThisWorkbook.Path & "\SQLダンプ.xlsx")
+    Set wsDump = wbDump.Sheets(1)
+    Set wbTemplate = Workbooks.Open(ThisWorkbook.Path & "\テンプレート.xlsx")
+    
+    ' 辞書オブジェクトを作成
+    Set dictTables = CreateObject("Scripting.Dictionary")
+    
+    ' 最終行を取得
+    lastRow = wsDump.Cells(wsDump.Rows.Count, 1).End(xlUp).Row
+    
+    ' データを解析して辞書に格納
+    prevFunctionCase = ""
+    
+    For i = 3 To lastRow ' 3行目からデータが始まると仮定
+        cellValue = Trim(wsDump.Cells(i, 1).Value)
+        
+        If cellValue <> "" And cellValue <> "ケース" Then
+            ' 機能名_ケース番号_テーブル名を解析
+            Call ParseCellValue(cellValue, functionName, caseNumber, tableName)
+            
+            If functionName <> "" And caseNumber <> "" And tableName <> "" Then
+                currentFunctionCase = functionName & "_" & caseNumber
+                
+                ' 新しい機能・ケースの組み合わせの場合
+                If currentFunctionCase <> prevFunctionCase And prevFunctionCase <> "" Then
+                    ' 前の機能・ケースのExcelファイルを作成
+                    Call CreateOutputFile(dictTables, wbTemplate, prevFunctionCase)
+                    Set dictTables = CreateObject("Scripting.Dictionary")
+                End If
+                
+                ' 辞書にテーブル情報を追加
+                If Not dictTables.Exists(tableName) Then
+                    Set dictTables(tableName) = CreateObject("Scripting.Dictionary")
+                    dictTables(tableName)("gen") = New Collection
+                    dictTables(tableName)("shin") = New Collection
+                    dictTables(tableName)("functionCase") = currentFunctionCase
+                End If
+                
+                ' データ行を作成
+                Set currentData = CreateObject("Scripting.Dictionary")
+                currentData("kubun") = wsDump.Cells(i, 2).Value ' 現新区分
+                currentData("col3") = wsDump.Cells(i, 3).Value  ' レコードID
+                currentData("col4") = wsDump.Cells(i, 4).Value  ' 店番号
+                ' 必要に応じて列を追加
+                Dim j As Long
+                For j = 5 To 20 ' 最大20列まで対応
+                    currentData("col" & j) = wsDump.Cells(i, j).Value
+                Next j
+                
+                ' 現/新で分類
+                If wsDump.Cells(i, 2).Value = "現" Then
+                    dictTables(tableName)("gen").Add currentData
+                ElseIf wsDump.Cells(i, 2).Value = "新" Then
+                    dictTables(tableName)("shin").Add currentData
+                End If
+                
+                prevFunctionCase = currentFunctionCase
+            End If
+        End If
+    Next i
+    
+    ' 最後の機能・ケースのファイルを作成
+    If dictTables.Count > 0 Then
+        Call CreateOutputFile(dictTables, wbTemplate, prevFunctionCase)
+    End If
+    
+    ' クリーンアップ
+    wbDump.Close SaveChanges:=False
+    wbTemplate.Close SaveChanges:=False
+    
+    Application.ScreenUpdating = True
+    Application.DisplayAlerts = True
+    
+    MsgBox "比較ファイルの作成が完了しました。", vbInformation
+    Exit Sub
+    
+ErrorHandler:
+    Application.ScreenUpdating = True
+    Application.DisplayAlerts = True
+    MsgBox "エラーが発生しました: " & Err.Description & vbCrLf & "行: " & Erl, vbCritical
+End Sub
+
+' セル値を解析する関数
+Sub ParseCellValue(cellValue As String, ByRef functionName As String, ByRef caseNumber As String, ByRef tableName As String)
+    Dim parts() As String
+    Dim temp As String
+    
+    functionName = ""
+    caseNumber = ""
+    tableName = ""
+    
+    ' アンダースコアで分割
+    parts = Split(cellValue, "_")
+    
+    If UBound(parts) >= 2 Then
+        ' 000(機能名)_1-1_テーブル名 の形式
+        functionName = parts(0) ' 000(機能名)
+        caseNumber = parts(1)   ' 1-1
+        
+        ' テーブル名は残りを結合
+        Dim k As Long
+        For k = 2 To UBound(parts)
+            If tableName = "" Then
+                tableName = parts(k)
+            Else
+                tableName = tableName & "_" & parts(k)
+            End If
+        Next k
+    End If
+End Sub
+
+' 出力ファイルを作成する関数
+Sub CreateOutputFile(dictTables As Object, wbTemplate As Workbook, functionCase As String)
+    Dim wbOutput As Workbook
+    Dim wsTemplate As Worksheet
+    Dim wsNew As Worksheet
+    Dim tableName As Variant
+    Dim genData As Collection
+    Dim shinData As Collection
+    Dim dataItem As Object
+    Dim rowNum As Long
+    Dim i As Long
+    Dim colNum As Long
+    
+    ' 新しいワークブックを作成
+    Set wbOutput = Workbooks.Add
+    
+    ' 各テーブルに対してシートを作成
+    For Each tableName In dictTables.Keys
+        ' テンプレートからシートを探す
+        On Error Resume Next
+        Set wsTemplate = wbTemplate.Sheets(CStr(tableName))
+        On Error GoTo 0
+        
+        If wsTemplate Is Nothing Then
+            ' テンプレートが見つからない場合は最初のシートを使用
+            Set wsTemplate = wbTemplate.Sheets(1)
+        End If
+        
+        ' テンプレートをコピー
+        wsTemplate.Copy After:=wbOutput.Sheets(wbOutput.Sheets.Count)
+        Set wsNew = wbOutput.Sheets(wbOutput.Sheets.Count)
+        
+        ' シート名を設定（最大31文字）
+        wsNew.Name = Left(CStr(tableName), 31)
+        
+        ' データを貼り付け
+        Set genData = dictTables(tableName)("gen")
+        Set shinData = dictTables(tableName)("shin")
+        
+        ' 現データ（A2～A31）
+        rowNum = 2
+        For i = 1 To genData.Count
+            If rowNum > 31 Then Exit For
+            Set dataItem = genData(i)
+            
+            ' A列：現新区分
+            wsNew.Cells(rowNum, 1).Value = dataItem("kubun")
+            
+            ' B列以降：各カラムデータ
+            For colNum = 3 To 20
+                If dataItem.Exists("col" & colNum) Then
+                    wsNew.Cells(rowNum, colNum - 1).Value = dataItem("col" & colNum)
+                End If
+            Next colNum
+            
+            rowNum = rowNum + 1
+        Next i
+        
+        ' 新データ（A32～A61）
+        rowNum = 32
+        For i = 1 To shinData.Count
+            If rowNum > 61 Then Exit For
+            Set dataItem = shinData(i)
+            
+            ' A列：現新区分
+            wsNew.Cells(rowNum, 1).Value = dataItem("kubun")
+            
+            ' B列以降：各カラムデータ
+            For colNum = 3 To 20
+                If dataItem.Exists("col" & colNum) Then
+                    wsNew.Cells(rowNum, colNum - 1).Value = dataItem("col" & colNum)
+                End If
+            Next colNum
+            
+            rowNum = rowNum + 1
+        Next i
+        
+        Set wsTemplate = Nothing
+    Next tableName
+    
+    ' 初期シート（Sheet1など）を削除
+    Application.DisplayAlerts = False
+    On Error Resume Next
+    wbOutput.Sheets("Sheet1").Delete
+    On Error GoTo 0
+    Application.DisplayAlerts = True
+    
+    ' ファイルを保存
+    wbOutput.SaveAs ThisWorkbook.Path & "\" & functionCase & "_比較_" & Format(Now, "yyyymmdd_hhmmss") & ".xlsx"
+    wbOutput.Close SaveChanges:=True
+End Sub
